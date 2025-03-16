@@ -334,6 +334,7 @@ func (r *Registry) getOrCreateContainer(pid uint32) *Container {
 		return nil
 	}
 	id := calcId(cg, md)
+	app := getApplabel(cg, md)
 	klog.Infof("calculated container id %d -> %s -> %s", pid, cg.Id, id)
 	if id == "" {
 		if cg.Id == "/init.scope" && pid != 1 {
@@ -363,7 +364,7 @@ func (r *Registry) getOrCreateContainer(pid uint32) *Container {
 	}
 
 	klog.InfoS("detected a new container", "pid", pid, "cg", cg.Id, "id", id)
-	if err := prometheus.WrapRegistererWith(prometheus.Labels{"container_id": string(id)}, r.reg).Register(c); err != nil {
+	if err := prometheus.WrapRegistererWith(prometheus.Labels{"container_id": string(id), "app": app}, r.reg).Register(c); err != nil {
 		klog.Warningln("failed to register container:", err)
 		return nil
 	}
@@ -424,6 +425,7 @@ func calcId(cg *cgroup.Cgroup, md *ContainerMetadata) ContainerID {
 		pod := md.labels["io.kubernetes.pod.name"]
 		namespace := md.labels["io.kubernetes.pod.namespace"]
 		name := md.labels["io.kubernetes.container.name"]
+
 		if cg.ContainerType == cgroup.ContainerTypeSandbox {
 			name = "sandbox"
 		}
@@ -466,6 +468,46 @@ func calcId(cg *cgroup.Cgroup, md *ContainerMetadata) ContainerID {
 		return ""
 	}
 	return ContainerID("/docker/" + md.name)
+}
+
+func getApplabel(cg *cgroup.Cgroup, md *ContainerMetadata) string {
+
+	if cg.ContainerId == "" {
+		return ""
+	}
+	if md.labels["io.kubernetes.pod.name"] != "" {
+		pod := md.labels["io.kubernetes.pod.name"]
+		namespace := md.labels["io.kubernetes.pod.namespace"]
+		name := md.labels["io.kubernetes.container.name"]
+
+		// Fetch k8s labels first
+		if k8sLabels := getPodLabels(namespace, pod); k8sLabels != nil {
+			klog.V(4).Infof("Found k8s labels for %s/%s: %v", namespace, pod, k8sLabels)
+			// Merge k8s labels into container metadata
+			for k, v := range k8sLabels {
+				md.labels[k] = v
+			}
+		}
+		// Get app label with fallbacks
+		app := md.labels["app"]
+		if app == "" {
+			app = md.labels["k8s-app"]
+		}
+		if app == "" {
+			app = md.labels["app.kubernetes.io/name"]
+		}
+		if app == "" {
+			app = md.labels["app.kubernetes.io/instance"]
+		}
+		if app == "" {
+			app = fmt.Sprintf("unknown-%s", md.labels)
+		}
+		if name == "" || name == "POD" { // skip pause containers
+			return ""
+		}
+		return app
+	}
+	return ""
 }
 
 func getContainerMetadata(cg *cgroup.Cgroup) (*ContainerMetadata, error) {
